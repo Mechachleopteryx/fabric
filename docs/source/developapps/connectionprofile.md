@@ -209,7 +209,7 @@ about it:
   application operations relate to organizations rather than channels. For
   example, an application can request notification from one or all peers within
   its organization, or all organizations within the network -- using [connection
-  options](./connectoptions.html).  For this, there needs to be an organization
+  options](./connectionoptions.html).  For this, there needs to be an organization
   to peer mapping, and this section provides it.
 
 * Line 101: `MagnetoCorp:`
@@ -274,7 +274,7 @@ details of the network topology.
 This file is reproduced inline from the GitHub commercial paper
 [sample](https://github.com/hyperledger/fabric-samples/blob/{BRANCH}/commercial-paper/organization/magnetocorp/gateway/networkConnection.yaml).
 
-```yaml
+```
 1: ---
 2: #
 3: # [Required]. A connection profile contains information about a set of network
@@ -478,7 +478,7 @@ This file is reproduced inline from the GitHub commercial paper
 201:     #
 202:     url: http://localhost:7054
 203:     #
-204:     # [Optioanl]. HTTP connection properties used for communication
+204:     # [Optional]. HTTP connection properties used for communication
 205:     #
 206:     httpOptions:
 207:       verify: false

@@ -53,7 +53,7 @@ bccsp:
   default: PKCS11
   pkcs11:
     Library: /etc/hyperledger/fabric/libsofthsm2.so
-    Pin: 71811222
+    Pin: "71811222"
     Label: fabric
     hash: SHA2
     security: 256
@@ -84,9 +84,9 @@ If you are connecting to softhsm2 using the Fabric orderer, you could set the fo
 
 ```
 ORDERER_GENERAL_BCCSP_DEFAULT=PKCS11
-ORDERER_GENERAL_PKCS11_LIBRARY=/etc/hyperledger/fabric/libsofthsm2.so
-ORDERER_GENERAL_PKCS11_PIN=71811222
-ORDERER_GENERAL_PKCS11_LABEL=fabric
+ORDERER_GENERAL_BCCSP_PKCS11_LIBRARY=/etc/hyperledger/fabric/libsofthsm2.so
+ORDERER_GENERAL_BCCSP_PKCS11_PIN=71811222
+ORDERER_GENERAL_BCCSP_PKCS11_LABEL=fabric
 ```
 
 If you are deploying your nodes using docker compose, after building your own
@@ -134,7 +134,7 @@ You can set up a Fabric CA to use an HSM by making the same edits to the CA serv
     default: PKCS11
     pkcs11:
       Library: /etc/hyperledger/fabric/libsofthsm2.so
-      Pin: 71811222
+      Pin: "71811222"
       Label: fabric
       hash: SHA2
       security: 256

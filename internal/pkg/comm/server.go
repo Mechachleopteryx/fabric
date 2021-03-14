@@ -9,6 +9,7 @@ package comm
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -33,9 +34,6 @@ type GRPCServer struct {
 	serverCertificate atomic.Value
 	// lock to protect concurrent access to append / remove
 	lock *sync.Mutex
-	// Set of PEM-encoded X509 certificate authorities used to populate
-	// the tlsConfig.ClientCAs indexed by subject
-	clientRootCAs map[string]*x509.Certificate
 	// TLS configuration used by the grpc server
 	tls *TLSConfig
 	// Server for gRPC Health Check Protocol.
@@ -48,9 +46,8 @@ func NewGRPCServer(address string, serverConfig ServerConfig) (*GRPCServer, erro
 	if address == "" {
 		return nil, errors.New("missing address parameter")
 	}
-	//create our listener
+	// create our listener
 	lis, err := net.Listen("tcp", address)
-
 	if err != nil {
 		return nil, err
 	}
@@ -66,14 +63,14 @@ func NewGRPCServerFromListener(listener net.Listener, serverConfig ServerConfig)
 		lock:     &sync.Mutex{},
 	}
 
-	//set up our server options
+	// set up our server options
 	var serverOpts []grpc.ServerOption
 
 	secureConfig := serverConfig.SecOpts
 	if secureConfig.UseTLS {
-		//both key and cert are required
+		// both key and cert are required
 		if secureConfig.Key != nil && secureConfig.Certificate != nil {
-			//load server public and private keys
+			// load server public and private keys
 			cert, err := tls.X509KeyPair(secureConfig.Certificate, secureConfig.Key)
 			if err != nil {
 				return nil, err
@@ -81,7 +78,7 @@ func NewGRPCServerFromListener(listener net.Listener, serverConfig ServerConfig)
 
 			grpcServer.serverCertificate.Store(cert)
 
-			//set up our TLS config
+			// set up our TLS config
 			if len(secureConfig.CipherSuites) == 0 {
 				secureConfig.CipherSuites = DefaultTLSCipherSuites
 			}
@@ -104,14 +101,12 @@ func NewGRPCServerFromListener(listener net.Listener, serverConfig ServerConfig)
 				}
 			}
 			grpcServer.tls.config.ClientAuth = tls.RequestClientCert
-			//check if client authentication is required
+			// check if client authentication is required
 			if secureConfig.RequireClientCert {
-				//require TLS client auth
+				// require TLS client auth
 				grpcServer.tls.config.ClientAuth = tls.RequireAndVerifyClientCert
-				//if we have client root CAs, create a certPool
+				// if we have client root CAs, create a certPool
 				if len(secureConfig.ClientRootCAs) > 0 {
-					grpcServer.clientRootCAs = make(map[string]*x509.Certificate)
-
 					grpcServer.tls.config.ClientCAs = x509.NewCertPool()
 					for _, clientRootCA := range secureConfig.ClientRootCAs {
 						err = grpcServer.appendClientRootCA(clientRootCA)
@@ -130,10 +125,10 @@ func NewGRPCServerFromListener(listener net.Listener, serverConfig ServerConfig)
 		}
 	}
 	// set max send and recv msg sizes
-	serverOpts = append(serverOpts, grpc.MaxSendMsgSize(MaxSendMsgSize))
-	serverOpts = append(serverOpts, grpc.MaxRecvMsgSize(MaxRecvMsgSize))
+	serverOpts = append(serverOpts, grpc.MaxSendMsgSize(DefaultMaxSendMsgSize))
+	serverOpts = append(serverOpts, grpc.MaxRecvMsgSize(DefaultMaxRecvMsgSize))
 	// set the keepalive options
-	serverOpts = append(serverOpts, ServerKeepaliveOptions(serverConfig.KaOpts)...)
+	serverOpts = append(serverOpts, serverConfig.KaOpts.ServerKeepaliveOptions()...)
 	// set connection timeout
 	if serverConfig.ConnectionTimeout <= 0 {
 		serverConfig.ConnectionTimeout = DefaultConnectionTimeout
@@ -234,7 +229,7 @@ func (gServer *GRPCServer) Stop() {
 
 // internal function to add a PEM-encoded clientRootCA
 func (gServer *GRPCServer) appendClientRootCA(clientRoot []byte) error {
-	certs, subjects, err := pemToX509Certs(clientRoot)
+	certs, err := pemToX509Certs(clientRoot)
 	if err != nil {
 		return errors.WithMessage(err, "failed to append client root certificate(s)")
 	}
@@ -243,14 +238,34 @@ func (gServer *GRPCServer) appendClientRootCA(clientRoot []byte) error {
 		return errors.New("no client root certificates found")
 	}
 
-	for i, cert := range certs {
-		//first add to the ClientCAs
+	for _, cert := range certs {
 		gServer.tls.AddClientRootCA(cert)
-		//add it to our clientRootCAs map using subject as key
-		gServer.clientRootCAs[subjects[i]] = cert
 	}
 
 	return nil
+}
+
+// parse PEM-encoded certs
+func pemToX509Certs(pemCerts []byte) ([]*x509.Certificate, error) {
+	var certs []*x509.Certificate
+
+	// it's possible that multiple certs are encoded
+	for len(pemCerts) > 0 {
+		var block *pem.Block
+		block, pemCerts = pem.Decode(pemCerts)
+		if block == nil {
+			break
+		}
+
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+
+		certs = append(certs, cert)
+	}
+
+	return certs, nil
 }
 
 // SetClientRootCAs sets the list of authorities used to verify client
@@ -259,26 +274,12 @@ func (gServer *GRPCServer) SetClientRootCAs(clientRoots [][]byte) error {
 	gServer.lock.Lock()
 	defer gServer.lock.Unlock()
 
-	//create a new map and CertPool
-	clientRootCAs := make(map[string]*x509.Certificate)
-	for _, clientRoot := range clientRoots {
-		certs, subjects, err := pemToX509Certs(clientRoot)
-		if err != nil {
-			return errors.WithMessage(err, "failed to set client root certificate(s)")
-		}
-
-		for i, cert := range certs {
-			clientRootCAs[subjects[i]] = cert
-		}
-	}
-
-	//create a new CertPool and populate with the new clientRootCAs
 	certPool := x509.NewCertPool()
-	for _, clientRoot := range clientRootCAs {
-		certPool.AddCert(clientRoot)
+	for _, clientRoot := range clientRoots {
+		if !certPool.AppendCertsFromPEM(clientRoot) {
+			return errors.New("failed to set client root certificate(s)")
+		}
 	}
-
-	gServer.clientRootCAs = clientRootCAs
 	gServer.tls.SetClientCAs(certPool)
 	return nil
 }

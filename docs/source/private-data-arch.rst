@@ -21,22 +21,28 @@ chaincode definition, use the ``--collections-config`` flag to specify the path
 to the collection definition file. If you are using the Fabric SDK for Node.js,
 visit `How to install and start your chaincode <https://hyperledger.github.io/fabric-sdk-node/{BRANCH}/tutorial-chaincode-lifecycle.html>`_.
 To use the `previous lifecycle process <https://hyperledger-fabric.readthedocs.io/en/release-1.4/chaincode4noah.html>`_ to deploy a private data collection,
-use the ``--collections-config`` flag when `instantiating your chaincode <https://hyperledger-fabric.readthedocs.io/en/latest/commands/peerchaincode.html#peer-chaincode-instantiate>`_.
+use the ``--collections-config`` flag when `instantiating your chaincode <https://hyperledger-fabric.readthedocs.io/en/{BRANCH_DOC}/commands/peerchaincode.html#peer-chaincode-instantiate>`_.
 
 Collection definitions are composed of the following properties:
 
 * ``name``: Name of the collection.
 
 * ``policy``: The private data collection distribution policy defines which
-  organizations' peers are allowed to persist the collection data expressed using
+  organizations' peers are allowed to retrieve and persist the collection data expressed using
   the ``Signature`` policy syntax, with each member being included in an ``OR``
   signature policy list. To support read/write transactions, the private data
-  distribution policy must define a broader set of organizations than the chaincode
+  distribution policy must define a broader set of organizations than the
   endorsement policy, as peers must have the private data in order to endorse
   proposed transactions. For example, in a channel with ten organizations,
   five of the organizations might be included in a private data collection
   distribution policy, but the endorsement policy might call for any three
-  of the organizations to endorse.
+  of the organizations in the channel to endorse a read/write transaction.
+  For write-only transactions, organizations that are not members of the
+  collection distribution policy but are included in the chaincode level
+  endorsement policy may endorse transactions that write to the private data
+  collection. If this is not desirable, utilize a collection level
+  ``endorsementPolicy`` to restrict the set of allowed endorsers to the private data
+  distribution policy members.
 
 * ``requiredPeerCount``: Minimum number of peers (across authorized organizations)
   that each endorsing peer must successfully disseminate private data to before the
@@ -253,7 +259,7 @@ chain. Private data that is predictable should therefore include a random "salt"
 that is concatenated with the private data key and included in the private data
 value, so that a matching hash cannot realistically be found via brute force.
 The random "salt" can be generated at the client side (e.g. by sampling a secure
-psuedo-random source) and then passed along with the private data in the transient
+pseudo-random source) and then passed along with the private data in the transient
 field at the time of chaincode invocation.
 
 Access control for private data

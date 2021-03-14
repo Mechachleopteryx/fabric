@@ -7,8 +7,6 @@ SPDX-License-Identifier: Apache-2.0
 package tests
 
 import (
-	"testing"
-
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric-protos-go/ledger/rwset"
@@ -18,9 +16,7 @@ import (
 	"github.com/hyperledger/fabric/common/crypto"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/policydsl"
-	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/tests/fakes"
-	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/statedb/statecouchdb"
 	"github.com/hyperledger/fabric/internal/pkg/txflags"
 	"github.com/hyperledger/fabric/protoutil"
 )
@@ -44,11 +40,6 @@ type txAndPvtdata struct {
 }
 
 //go:generate counterfeiter -o fakes/signer.go --fake-name Signer . signer
-
-type signer interface {
-	Sign(msg []byte) ([]byte, error)
-	Serialize() ([]byte, error)
-}
 
 func convertToCollConfigProtoBytes(collConfs []*collConf) ([]byte, error) {
 	var protoConfArray []*protopeer.CollectionConfig
@@ -147,7 +138,6 @@ func constructUnsignedTxEnv(
 	visibility []byte,
 	headerType common.HeaderType,
 ) (*common.Envelope, string, error) {
-
 	sigID := &fakes.Signer{}
 	sigID.SerializeReturns([]byte("signer"), nil)
 	sigID.SignReturns([]byte("signature"), nil)
@@ -170,10 +160,13 @@ func constructUnsignedTxEnv(
 			},
 			ss,
 		)
-
+		if err != nil {
+			return nil, "", err
+		}
 	} else {
 		// if txid is set, we should not generate a txid instead reuse the given txid
-		nonce, err := crypto.GetRandomNonce()
+		var nonce []byte
+		nonce, err = crypto.GetRandomNonce()
 		if err != nil {
 			return nil, "", err
 		}
@@ -190,9 +183,9 @@ func constructUnsignedTxEnv(
 			ss,
 			nil,
 		)
-	}
-	if err != nil {
-		return nil, "", err
+		if err != nil {
+			return nil, "", err
+		}
 	}
 
 	presp, err := protoutil.CreateProposalResponse(
@@ -228,8 +221,4 @@ func setBlockFlagsToValid(block *common.Block) {
 	protoutil.InitBlockMetadata(block)
 	block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] =
 		txflags.NewWithValues(len(block.Data.Data), protopeer.TxValidationCode_VALID)
-}
-
-func dropCouchDBs(t *testing.T, couchdbConfig *ledger.CouchDBConfig) {
-	statecouchdb.DeleteApplicationDBs(t, couchdbConfig)
 }

@@ -28,8 +28,7 @@ are provided:
 -) "delep": delete the key-level endorsement policy for the state altogether
 -) "listorgs": list the orgs included in the state's endorsement policy
 */
-type EndorsementCC struct {
-}
+type EndorsementCC struct{}
 
 // Init callback
 func (cc *EndorsementCC) Init(stub shim.ChaincodeStubInterface) pb.Response {
@@ -120,13 +119,18 @@ func delOrgs(stub shim.ChaincodeStubInterface) pb.Response {
 	// get the endorsement policy for the key
 	var epBytes []byte
 	var err error
-	if parameters[0] == "pub" {
+	switch parameters[0] {
+	case "pub":
 		epBytes, err = stub.GetStateValidationParameter("pub")
-	} else if parameters[0] == "priv" {
+	case "priv":
 		epBytes, err = stub.GetPrivateDataValidationParameter("col", "priv")
-	} else {
+	default:
 		return shim.Error("Unknown key specified")
 	}
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
 	ep, err := statebased.NewStateEP(epBytes)
 	if err != nil {
 		return shim.Error(err.Error())
@@ -163,13 +167,18 @@ func listOrgs(stub shim.ChaincodeStubInterface) pb.Response {
 	// get the endorsement policy for the key
 	var epBytes []byte
 	var err error
-	if parameters[0] == "pub" {
+	switch parameters[0] {
+	case "pub":
 		epBytes, err = stub.GetStateValidationParameter("pub")
-	} else if parameters[0] == "priv" {
+	case "priv":
 		epBytes, err = stub.GetPrivateDataValidationParameter("col", "priv")
-	} else {
+	default:
 		return shim.Error("Unknown key specified")
 	}
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
 	ep, err := statebased.NewStateEP(epBytes)
 	if err != nil {
 		return shim.Error(err.Error())

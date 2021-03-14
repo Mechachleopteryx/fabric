@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -16,27 +15,21 @@ import (
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/viperutil"
 	coreconfig "github.com/hyperledger/fabric/core/config"
-	"github.com/spf13/viper"
 )
-
-// Prefix for environment variables.
-const Prefix = "ORDERER"
 
 var logger = flogging.MustGetLogger("localconfig")
 
 // TopLevel directly corresponds to the orderer config YAML.
-// Note, for non 1-1 mappings, you may append
-// something like `mapstructure:"weirdFoRMat"` to
-// modify the default mapping, see the "Unmarshal"
-// section of https://github.com/spf13/viper for more info.
 type TopLevel struct {
-	General    General
-	FileLedger FileLedger
-	Kafka      Kafka
-	Debug      Debug
-	Consensus  interface{}
-	Operations Operations
-	Metrics    Metrics
+	General              General
+	FileLedger           FileLedger
+	Kafka                Kafka
+	Debug                Debug
+	Consensus            interface{}
+	Operations           Operations
+	Metrics              Metrics
+	ChannelParticipation ChannelParticipation
+	Admin                Admin
 }
 
 // General contains config which should be common among all orderer types.
@@ -87,12 +80,13 @@ type Keepalive struct {
 
 // TLS contains configuration for TLS connections.
 type TLS struct {
-	Enabled            bool
-	PrivateKey         string
-	Certificate        string
-	RootCAs            []string
-	ClientAuthRequired bool
-	ClientRootCAs      []string
+	Enabled               bool
+	PrivateKey            string
+	Certificate           string
+	RootCAs               []string
+	ClientAuthRequired    bool
+	ClientRootCAs         []string
+	TLSHandshakeTimeShift time.Duration
 }
 
 // SASLPlain contains configuration for SASL/PLAIN authentication
@@ -118,7 +112,7 @@ type Profile struct {
 // FileLedger contains configuration for the file-based ledger.
 type FileLedger struct {
 	Location string
-	Prefix   string
+	Prefix   string // For compatibility only. This setting is no longer supported.
 }
 
 // Kafka contains configuration for the Kafka-based orderer.
@@ -185,13 +179,13 @@ type Debug struct {
 	DeliverTraceDir   string
 }
 
-// Operations configures the operations endpont for the orderer.
+// Operations configures the operations endpoint for the orderer.
 type Operations struct {
 	ListenAddress string
 	TLS           TLS
 }
 
-// Operations confiures the metrics provider for the orderer.
+// Metrics configures the metrics provider for the orderer.
 type Metrics struct {
 	Provider string
 	Statsd   Statsd
@@ -203,6 +197,19 @@ type Statsd struct {
 	Address       string
 	WriteInterval time.Duration
 	Prefix        string
+}
+
+// Admin configures the admin endpoint for the orderer.
+type Admin struct {
+	ListenAddress string
+	TLS           TLS
+}
+
+// ChannelParticipation provides the channel participation API configuration for the orderer.
+// Channel participation uses the same ListenAddress and TLS settings of the Operations service.
+type ChannelParticipation struct {
+	Enabled            bool
+	MaxRequestBodySize uint32
 }
 
 // Defaults carries the default orderer configuration values.
@@ -236,7 +243,6 @@ var Defaults = TopLevel{
 	},
 	FileLedger: FileLedger{
 		Location: "/var/hyperledger/production/orderer",
-		Prefix:   "hyperledger-fabric-ordererledger",
 	},
 	Kafka: Kafka{
 		Retry: Retry{
@@ -280,6 +286,13 @@ var Defaults = TopLevel{
 	Metrics: Metrics{
 		Provider: "disabled",
 	},
+	ChannelParticipation: ChannelParticipation{
+		Enabled:            false,
+		MaxRequestBodySize: 1024 * 1024,
+	},
+	Admin: Admin{
+		ListenAddress: "127.0.0.1:0",
+	},
 }
 
 // Load parses the orderer YAML file and environment, producing
@@ -302,12 +315,8 @@ var cache = &configCache{}
 func (c *configCache) load() (*TopLevel, error) {
 	var uconf TopLevel
 
-	config := viper.New()
-	coreconfig.InitViper(config, "orderer")
-	config.SetEnvPrefix(Prefix)
-	config.AutomaticEnv()
-	replacer := strings.NewReplacer(".", "_")
-	config.SetEnvKeyReplacer(replacer)
+	config := viperutil.New()
+	config.SetConfigName("orderer")
 
 	if err := config.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("Error reading configuration: %s", err)
@@ -317,7 +326,7 @@ func (c *configCache) load() (*TopLevel, error) {
 	defer c.mutex.Unlock()
 	serializedConf, ok := c.cache[config.ConfigFileUsed()]
 	if !ok {
-		err := viperutil.EnhancedExactUnmarshal(config, &uconf)
+		err := config.EnhancedExactUnmarshal(&uconf)
 		if err != nil {
 			return nil, fmt.Errorf("Error unmarshaling config into struct: %s", err)
 		}
@@ -432,10 +441,6 @@ func (c *TopLevel) completeInitialization(configDir string) {
 			logger.Infof("General.Authentication.TimeWindow unset, setting to %s", Defaults.General.Authentication.TimeWindow)
 			c.General.Authentication.TimeWindow = Defaults.General.Authentication.TimeWindow
 
-		case c.FileLedger.Prefix == "":
-			logger.Infof("FileLedger.Prefix unset, setting to %s", Defaults.FileLedger.Prefix)
-			c.FileLedger.Prefix = Defaults.FileLedger.Prefix
-
 		case c.Kafka.Retry.ShortInterval == 0:
 			logger.Infof("Kafka.Retry.ShortInterval unset, setting to %v", Defaults.Kafka.Retry.ShortInterval)
 			c.Kafka.Retry.ShortInterval = Defaults.Kafka.Retry.ShortInterval
@@ -480,6 +485,9 @@ func (c *TopLevel) completeInitialization(configDir string) {
 		case c.Kafka.Version == sarama.KafkaVersion{}:
 			logger.Infof("Kafka.Version unset, setting to %v", Defaults.Kafka.Version)
 			c.Kafka.Version = Defaults.Kafka.Version
+
+		case c.Admin.TLS.Enabled && !c.Admin.TLS.ClientAuthRequired:
+			logger.Panic("Admin.TLS.ClientAuthRequired must be set to true if Admin.TLS.Enabled is set to true")
 
 		default:
 			return

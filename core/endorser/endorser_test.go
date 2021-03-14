@@ -385,11 +385,11 @@ var _ = Describe("Endorser", func() {
 
 		It("wraps and returns an error and responds to the client", func() {
 			proposalResponse, err := e.ProcessProposal(context.Background(), signedProposal)
-			Expect(err).To(MatchError("error validating proposal: access denied: channel [channel-id] creator org [msp-id]"))
+			Expect(err).To(MatchError("error validating proposal: access denied: channel [channel-id] creator org unknown, creator is malformed"))
 			Expect(proposalResponse).To(Equal(&pb.ProposalResponse{
 				Response: &pb.Response{
 					Status:  500,
-					Message: "error validating proposal: access denied: channel [channel-id] creator org [msp-id]",
+					Message: "error validating proposal: access denied: channel [channel-id] creator org unknown, creator is malformed",
 				},
 			}))
 		})
@@ -500,7 +500,7 @@ var _ = Describe("Endorser", func() {
 		Expect(blkHt).To(Equal(uint64(7)))
 
 		// TODO, this deserves a better test, but there was none before and this logic,
-		// really seems far too jumbled to be in the endorser package.  There are seperate
+		// really seems far too jumbled to be in the endorser package.  There are separate
 		// tests of the private data assembly functions in their test file.
 		Expect(privateData).NotTo(BeNil())
 		Expect(privateData.EndorsedAt).To(Equal(uint64(7)))
@@ -618,11 +618,11 @@ var _ = Describe("Endorser", func() {
 
 			It("wraps and returns an error and responds to the client", func() {
 				proposalResponse, err := e.ProcessProposal(context.Background(), signedProposal)
-				Expect(err).To(MatchError("error validating proposal: access denied: channel [] creator org [msp-id]"))
+				Expect(err).To(MatchError("error validating proposal: access denied: channel [] creator org unknown, creator is malformed"))
 				Expect(proposalResponse).To(Equal(&pb.ProposalResponse{
 					Response: &pb.Response{
 						Status:  500,
-						Message: "error validating proposal: access denied: channel [] creator org [msp-id]",
+						Message: "error validating proposal: access denied: channel [] creator org unknown, creator is malformed",
 					},
 				}))
 			})
@@ -983,7 +983,6 @@ var _ = Describe("Endorser", func() {
 
 	Context("when retrieving simulation results", func() {
 		BeforeEach(func() {
-
 			mockDeployedCCInfoProvider := &ledgermock.DeployedChaincodeInfoProvider{}
 			fakeSupport.GetDeployedCCInfoProviderReturns(mockDeployedCCInfoProvider)
 

@@ -18,22 +18,28 @@ import (
 	"time"
 
 	"github.com/hyperledger/fabric/common/metrics"
+	"github.com/hyperledger/fabric/common/metrics/disabled"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/pkg/errors"
 )
 
-var expectedDatabaseNamePattern = `[a-z][a-z0-9.$_()+-]*`
-var maxLength = 238
+var (
+	expectedDatabaseNamePattern = `[a-z][a-z0-9.$_()+-]*`
+	maxLength                   = 238
+)
 
 // To restrict the length of couchDB database name to the
 // allowed length of 249 chars, the string length limit
 // for chain/channel name, namespace/chaincode name, and
 // collection name, which constitutes the database name,
 // is defined.
-var chainNameAllowedLength = 50
-var namespaceNameAllowedLength = 50
-var collectionNameAllowedLength = 50
+var (
+	chainNameAllowedLength      = 50
+	namespaceNameAllowedLength  = 50
+	collectionNameAllowedLength = 50
+	disableKeepAlive            bool
+)
 
 func createCouchInstance(config *ledger.CouchDBConfig, metricsProvider metrics.Provider) (*couchInstance, error) {
 	// make sure the address is valid
@@ -68,11 +74,12 @@ func createCouchInstance(config *ledger.CouchDBConfig, metricsProvider metrics.P
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		DisableKeepAlives:     disableKeepAlive,
 	}
 
 	client.Transport = transport
 
-	//Create the CouchDB instance
+	// Create the CouchDB instance
 	couchInstance := &couchInstance{
 		conf:   config,
 		client: client,
@@ -83,12 +90,12 @@ func createCouchInstance(config *ledger.CouchDBConfig, metricsProvider metrics.P
 		return nil, verifyErr
 	}
 
-	//return an error if the http return value is not 200
+	// return an error if the http return value is not 200
 	if retVal.StatusCode != 200 {
 		return nil, errors.Errorf("CouchDB connection error, expecting return code of 200, received %v", retVal.StatusCode)
 	}
 
-	//check the CouchDB version number, return an error if the version is not at least 2.0.0
+	// check the CouchDB version number, return an error if the version is not at least 2.0.0
 	errVersion := checkCouchDBVersion(connectInfo.Version)
 	if errVersion != nil {
 		return nil, errVersion
@@ -97,71 +104,66 @@ func createCouchInstance(config *ledger.CouchDBConfig, metricsProvider metrics.P
 	return couchInstance, nil
 }
 
-//checkCouchDBVersion verifies CouchDB is at least 2.0.0
 func checkCouchDBVersion(version string) error {
-
-	//split the version into parts
-	majorVersion := strings.Split(version, ".")
-
-	//check to see that the major version number is at least 2
-	majorVersionInt, _ := strconv.Atoi(majorVersion[0])
-	if majorVersionInt < 2 {
-		return errors.Errorf("CouchDB must be at least version 2.0.0. Detected version %s", version)
+	couchVersion := strings.Split(version, ".")
+	majorVersion, _ := strconv.Atoi(couchVersion[0])
+	minorVersion, _ := strconv.Atoi(couchVersion[1])
+	if majorVersion < 2 {
+		return errors.Errorf("CouchDB v%s detected. CouchDB must be at least version 2.0.0", version)
 	}
-
+	if majorVersion != 3 || minorVersion < 1 {
+		couchdbLogger.Warnf("CouchDB v%s detected. CouchDB versions before 3.1.0 are unsupported.", version)
+	}
 	return nil
 }
 
-//createCouchDatabase creates a CouchDB database object, as well as the underlying database if it does not exist
+// createCouchDatabase creates a CouchDB database object, as well as the underlying database if it does not exist
 func createCouchDatabase(couchInstance *couchInstance, dbName string) (*couchDatabase, error) {
-
 	databaseName, err := mapAndValidateDatabaseName(dbName)
 	if err != nil {
-		logger.Errorf("Error calling CouchDB CreateDatabaseIfNotExist() for dbName: %s, error: %s", dbName, err)
+		couchdbLogger.Errorf("Error calling CouchDB CreateDatabaseIfNotExist() for dbName: %s, error: %s", dbName, err)
 		return nil, err
 	}
 
-	couchDBDatabase := couchDatabase{couchInstance: couchInstance, dbName: databaseName, indexWarmCounter: 1}
+	couchDBDatabase := couchDatabase{couchInstance: couchInstance, dbName: databaseName}
 
 	// Create CouchDB database upon ledger startup, if it doesn't already exist
 	err = couchDBDatabase.createDatabaseIfNotExist()
 	if err != nil {
-		logger.Errorf("Error calling CouchDB CreateDatabaseIfNotExist() for dbName: %s, error: %s", dbName, err)
+		couchdbLogger.Errorf("Error calling CouchDB CreateDatabaseIfNotExist() for dbName: %s, error: %s", dbName, err)
 		return nil, err
 	}
 
 	return &couchDBDatabase, nil
 }
 
-//createSystemDatabasesIfNotExist - creates the system databases if they do not exist
+// createSystemDatabasesIfNotExist - creates the system databases if they do not exist
 func createSystemDatabasesIfNotExist(couchInstance *couchInstance) error {
-
 	dbName := "_users"
-	systemCouchDBDatabase := couchDatabase{couchInstance: couchInstance, dbName: dbName, indexWarmCounter: 1}
+	systemCouchDBDatabase := couchDatabase{couchInstance: couchInstance, dbName: dbName}
 	err := systemCouchDBDatabase.createDatabaseIfNotExist()
 	if err != nil {
-		logger.Errorf("Error calling CouchDB createDatabaseIfNotExist() for system dbName: %s, error: %s", dbName, err)
+		couchdbLogger.Errorf("Error calling CouchDB createDatabaseIfNotExist() for system dbName: %s, error: %s", dbName, err)
 		return err
 	}
 
 	dbName = "_replicator"
-	systemCouchDBDatabase = couchDatabase{couchInstance: couchInstance, dbName: dbName, indexWarmCounter: 1}
+	systemCouchDBDatabase = couchDatabase{couchInstance: couchInstance, dbName: dbName}
 	err = systemCouchDBDatabase.createDatabaseIfNotExist()
 	if err != nil {
-		logger.Errorf("Error calling CouchDB createDatabaseIfNotExist() for system dbName: %s, error: %s", dbName, err)
+		couchdbLogger.Errorf("Error calling CouchDB createDatabaseIfNotExist() for system dbName: %s, error: %s", dbName, err)
 		return err
 	}
 	if couchInstance.conf.CreateGlobalChangesDB {
 		dbName = "_global_changes"
-		systemCouchDBDatabase = couchDatabase{couchInstance: couchInstance, dbName: dbName, indexWarmCounter: 1}
+		systemCouchDBDatabase = couchDatabase{couchInstance: couchInstance, dbName: dbName}
 		err = systemCouchDBDatabase.createDatabaseIfNotExist()
 		if err != nil {
-			logger.Errorf("Error calling CouchDB createDatabaseIfNotExist() for system dbName: %s, error: %s", dbName, err)
+			couchdbLogger.Errorf("Error calling CouchDB createDatabaseIfNotExist() for system dbName: %s, error: %s", dbName, err)
 			return err
 		}
 	}
 	return nil
-
 }
 
 // constructCouchDBUrl constructs a couchDB url with encoding for the database name
@@ -182,6 +184,12 @@ func constructCouchDBUrl(connectURL *url.URL, dbName string, pathElements ...str
 
 // constructMetadataDBName truncates the db name to couchdb allowed length to
 // construct the metadataDBName
+// Note:
+// Currently there is a non-deterministic collision between metadataDB and namespaceDB with namespace="".
+// When channel name is not truncated, metadataDB and namespaceDB with namespace="" have the same db name.
+// When channel name is truncated, these two DBs have different db names.
+// We have to deal with this behavior for now. In the future, we may rename metadataDB and
+// migrate the content to avoid the collision.
 func constructMetadataDBName(dbName string) string {
 	if len(dbName) > maxLength {
 		untruncatedDBName := dbName
@@ -296,4 +304,32 @@ func escapeUpperCase(dbName string) string {
 	re := regexp.MustCompile(`([A-Z])`)
 	dbName = re.ReplaceAllString(dbName, "$$"+"$1")
 	return strings.ToLower(dbName)
+}
+
+// DropApplicationDBs drops all application databases.
+func DropApplicationDBs(config *ledger.CouchDBConfig) error {
+	couchdbLogger.Info("Dropping CouchDB application databases ...")
+	couchInstance, err := createCouchInstance(config, &disabled.Provider{})
+	if err != nil {
+		return err
+	}
+	dbNames, err := couchInstance.retrieveApplicationDBNames()
+	if err != nil {
+		return err
+	}
+	for _, dbName := range dbNames {
+		if err = dropDB(couchInstance, dbName); err != nil {
+			couchdbLogger.Errorf("Error dropping CouchDB database %s", dbName)
+			return err
+		}
+	}
+	return nil
+}
+
+func dropDB(couchInstance *couchInstance, dbName string) error {
+	db := &couchDatabase{
+		couchInstance: couchInstance,
+		dbName:        dbName,
+	}
+	return db.dropDatabase()
 }

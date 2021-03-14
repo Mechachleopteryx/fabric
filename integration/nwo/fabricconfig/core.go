@@ -93,6 +93,8 @@ type Gossip struct {
 	AliveTimeInterval          time.Duration   `yaml:"aliveTimeInterval,omitempty"`
 	AliveExpirationTimeout     time.Duration   `yaml:"aliveExpirationTimeout,omitempty"`
 	ReconnectInterval          time.Duration   `yaml:"reconnectInterval,omitempty"`
+	MsgExpirationFactor        int             `yaml:"msgExpirationFactor,omitempty"`
+	MaxConnectionAttempts      int             `yaml:"maxConnectionAttempts,omitempty"`
 	ExternalEndpoint           string          `yaml:"externalEndpoint,omitempty"`
 	Election                   *GossipElection `yaml:"election,omitempty"`
 	PvtData                    *GossipPvtData  `yaml:"pvtData,omitempty"`
@@ -168,11 +170,20 @@ type Authentication struct {
 type BCCSP struct {
 	Default string            `yaml:"Default,omitempty"`
 	SW      *SoftwareProvider `yaml:"SW,omitempty"`
+	PKCS11  *PKCS11           `yaml:"PKCS11,omitempty"`
 }
 
 type SoftwareProvider struct {
 	Hash     string `yaml:"Hash,omitempty"`
 	Security int    `yaml:"Security,omitempty"`
+}
+
+type PKCS11 struct {
+	Hash     string `yaml:"Hash,omitempty"`
+	Security int    `yaml:"Security,omitempty"`
+	Pin      string `yaml:"Pin,omitempty"`
+	Label    string `yaml:"Label,omitempty"`
+	Library  string `yaml:"Library,omitempty"`
 }
 
 type DeliveryClient struct {
@@ -267,7 +278,7 @@ type Node struct {
 }
 
 type ExternalBuilder struct {
-	EnvironmentWhitelist []string `yaml:"environmentWhitelist,omitempty"`
+	PropagateEnvironment []string `yaml:"propagateEnvironment,omitempty"`
 	Name                 string   `yaml:"name,omitempty"`
 	Path                 string   `yaml:"path,omitempty"`
 }
@@ -283,8 +294,9 @@ type SystemFlags struct {
 
 type Ledger struct {
 	// Blockchain - not sure if it's needed
-	State   *StateConfig   `yaml:"state,omitempty"`
-	History *HistoryConfig `yaml:"history,omitempty"`
+	State        *StateConfig   `yaml:"state,omitempty"`
+	History      *HistoryConfig `yaml:"history,omitempty"`
+	PvtdataStore *PvtdataStore  `yaml:"pvtdataStore,omitempty"`
 }
 
 type StateConfig struct {
@@ -293,19 +305,22 @@ type StateConfig struct {
 }
 
 type CouchDBConfig struct {
-	CouchDBAddress          string        `yaml:"couchDBAddress,omitempty"`
-	Username                string        `yaml:"username,omitempty"`
-	Password                string        `yaml:"password,omitempty"`
-	MaxRetries              int           `yaml:"maxRetries,omitempty"`
-	MaxRetriesOnStartup     int           `yaml:"maxRetriesOnStartup,omitempty"`
-	RequestTimeout          time.Duration `yaml:"requestTimeout,omitempty"`
-	QueryLimit              int           `yaml:"queryLimit,omitempty"`
-	MaxBatchUpdateSize      int           `yaml:"maxBatchUpdateSize,omitempty"`
-	WarmIndexesAfterNBlocks int           `yaml:"warmIndexesAfteNBlocks,omitempty"`
+	CouchDBAddress      string        `yaml:"couchDBAddress,omitempty"`
+	Username            string        `yaml:"username,omitempty"`
+	Password            string        `yaml:"password,omitempty"`
+	MaxRetries          int           `yaml:"maxRetries,omitempty"`
+	MaxRetriesOnStartup int           `yaml:"maxRetriesOnStartup,omitempty"`
+	RequestTimeout      time.Duration `yaml:"requestTimeout,omitempty"`
+	QueryLimit          int           `yaml:"queryLimit,omitempty"`
+	MaxBatchUpdateSize  int           `yaml:"maxBatchUpdateSize,omitempty"`
 }
 
 type HistoryConfig struct {
 	EnableHistoryDatabase bool `yaml:"enableHistoryDatabase"`
+}
+
+type PvtdataStore struct {
+	DeprioritizedDataReconcilerInterval time.Duration
 }
 
 type Operations struct {

@@ -11,9 +11,7 @@ import (
 	"github.com/golang/protobuf/proto"
 )
 
-var (
-	keySep = []byte{0x00}
-)
+var keySep = []byte{0x00}
 
 // cache holds both the system and user cache
 type cache struct {
@@ -64,12 +62,12 @@ func (c *cache) getState(chainID, namespace, key string) (*CacheValue, error) {
 	}
 
 	cacheKey := constructCacheKey(chainID, namespace, key)
-	valBytes := cache.Get(nil, cacheKey)
-	if valBytes == nil {
+
+	if !cache.Has(cacheKey) {
 		return nil, nil
 	}
-
 	cacheValue := &CacheValue{}
+	valBytes := cache.Get(nil, cacheKey)
 	if err := proto.Unmarshal(valBytes, cacheValue); err != nil {
 		return nil, err
 	}
@@ -88,6 +86,11 @@ func (c *cache) putState(chainID, namespace, key string, cacheValue *CacheValue)
 	if err != nil {
 		return err
 	}
+
+	if cache.Has(cacheKey) {
+		cache.Del(cacheKey)
+	}
+
 	cache.Set(cacheKey, valBytes)
 	return nil
 }
@@ -126,11 +129,12 @@ func (c *cache) UpdateStates(chainID string, updates cacheUpdates) error {
 				cache.Del(cacheKey)
 				continue
 			}
-			if oldVal := cache.Get(nil, cacheKey); oldVal != nil {
+			if cache.Has(cacheKey) {
 				newValBytes, err := proto.Marshal(newVal)
 				if err != nil {
 					return err
 				}
+				cache.Del(cacheKey)
 				cache.Set(cacheKey, newValBytes)
 			}
 		}

@@ -19,7 +19,7 @@ import (
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -48,11 +48,18 @@ func TestPeriodicCheck(t *testing.T) {
 		reports <- duration
 	}
 
+	clears := make(chan struct{}, 1000)
+
+	reportCleared := func() {
+		clears <- struct{}{}
+	}
+
 	check := &PeriodicCheck{
 		Logger:        flogging.MustGetLogger("test"),
 		Condition:     condition,
 		CheckInterval: time.Millisecond,
 		Report:        report,
+		ReportCleared: reportCleared,
 	}
 
 	go check.Run()
@@ -81,9 +88,11 @@ func TestPeriodicCheck(t *testing.T) {
 		case report := <-reports:
 			lastReport = report
 		default:
-			break
 		}
 	}
+
+	g.Eventually(clears).Should(gomega.Receive())
+	g.Consistently(clears).ShouldNot(gomega.Receive())
 
 	// ensure the checks have been made
 	checksDoneSoFar := atomic.LoadUint32(&checkNum)
@@ -107,6 +116,7 @@ func TestPeriodicCheck(t *testing.T) {
 	time.Sleep(check.CheckInterval * 50)
 	// Ensure that we cease checking the condition, hence the PeriodicCheck is stopped.
 	g.Expect(atomic.LoadUint32(&checkNum)).To(gomega.BeNumerically("<", checkCountAfterStop+2))
+	g.Consistently(clears).ShouldNot(gomega.Receive())
 }
 
 func TestEvictionSuspector(t *testing.T) {
@@ -137,11 +147,18 @@ func TestEvictionSuspector(t *testing.T) {
 		blockPuller                 BlockPuller
 		blockPullerErr              error
 		height                      uint64
+		timesTriggered              int
 		halt                        func()
 	}{
 		{
 			description:                "suspected time is lower than threshold",
 			evictionSuspicionThreshold: 11 * time.Minute,
+			halt:                       t.Fail,
+		},
+		{
+			description:                "timesTriggered multiplier prevents threshold",
+			evictionSuspicionThreshold: 6 * time.Minute,
+			timesTriggered:             1,
 			halt:                       t.Fail,
 		},
 		{
@@ -218,7 +235,8 @@ func TestEvictionSuspector(t *testing.T) {
 					return testCase.height
 				},
 				logger:         flogging.MustGetLogger("test"),
-				triggerCatchUp: func(sn *raftpb.Snapshot) { return },
+				triggerCatchUp: func(sn *raftpb.Snapshot) {},
+				timesTriggered: testCase.timesTriggered,
 			}
 
 			foundExpectedLog := testCase.expectedLog == ""
@@ -234,7 +252,7 @@ func TestEvictionSuspector(t *testing.T) {
 			}
 
 			if testCase.expectedPanic != "" {
-				assert.PanicsWithValue(t, testCase.expectedPanic, runTestCase)
+				require.PanicsWithValue(t, testCase.expectedPanic, runTestCase)
 			} else {
 				runTestCase()
 				// Run the test case again.
@@ -245,8 +263,8 @@ func TestEvictionSuspector(t *testing.T) {
 				runTestCase()
 			}
 
-			assert.True(t, foundExpectedLog, "expected to find %s but didn't", testCase.expectedLog)
-			assert.Equal(t, testCase.expectedCommittedBlockCount, len(committedBlocks))
+			require.True(t, foundExpectedLog, "expected to find %s but didn't", testCase.expectedLog)
+			require.Equal(t, testCase.expectedCommittedBlockCount, len(committedBlocks))
 		})
 	}
 }

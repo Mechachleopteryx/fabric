@@ -30,6 +30,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
@@ -38,17 +39,21 @@ import (
 
 var timeout = time.Second * time.Duration(15)
 
-var aliveTimeInterval = time.Duration(time.Millisecond * 300)
-var defaultTestConfig = DiscoveryConfig{
-	AliveTimeInterval:            aliveTimeInterval,
-	AliveExpirationTimeout:       10 * aliveTimeInterval,
-	AliveExpirationCheckInterval: aliveTimeInterval,
-	ReconnectInterval:            10 * aliveTimeInterval,
-}
+var (
+	aliveTimeInterval = time.Duration(time.Millisecond * 300)
+	defaultTestConfig = DiscoveryConfig{
+		AliveTimeInterval:            aliveTimeInterval,
+		AliveExpirationTimeout:       10 * aliveTimeInterval,
+		AliveExpirationCheckInterval: aliveTimeInterval,
+		ReconnectInterval:            10 * aliveTimeInterval,
+		MaxConnectionAttempts:        DefMaxConnectionAttempts,
+		MsgExpirationFactor:          DefMsgExpirationFactor,
+	}
+)
 
 func init() {
 	util.SetupTestLogging()
-	maxConnectionAttempts = 10000
+	defaultTestConfig.MaxConnectionAttempts = 10000
 }
 
 type dummyReceivedMessage struct {
@@ -76,6 +81,15 @@ func (*dummyReceivedMessage) Ack(err error) {
 	panic("implement me")
 }
 
+// mockAnchorPeerTracker implements AnchorPeerTracker interface
+type mockAnchorPeerTracker struct {
+	apEndpoints []string
+}
+
+func (m *mockAnchorPeerTracker) IsAnchorPeer(endpoint string) bool {
+	return util.Contains(endpoint, m.apEndpoints)
+}
+
 type dummyCommModule struct {
 	validatedMessages chan *protoext.SignedGossipMessage
 	msgsReceived      uint32
@@ -92,6 +106,7 @@ type dummyCommModule struct {
 	shouldGossip      bool
 	disableComm       bool
 	mock              *mock.Mock
+	signCount         uint32
 }
 
 type gossipInstance struct {
@@ -128,6 +143,7 @@ func (comm *dummyCommModule) recordValidation(validatedMessages chan *protoext.S
 }
 
 func (comm *dummyCommModule) SignMessage(am *proto.GossipMessage, internalEndpoint string) *proto.Envelope {
+	atomic.AddUint32(&comm.signCount, 1)
 	protoext.NoopSign(am)
 
 	secret := &proto.Secret{
@@ -378,6 +394,12 @@ func createDiscoveryInstanceThatGossips(port int, id string, bootstrapPeers []st
 }
 
 func createDiscoveryInstanceThatGossipsWithInterceptors(port int, id string, bootstrapPeers []string, shouldGossip bool, pol DisclosurePolicy, f func(*protoext.SignedGossipMessage), config DiscoveryConfig) *gossipInstance {
+	mockTracker := &mockAnchorPeerTracker{}
+	return createDiscoveryInstanceWithAnchorPeerTracker(port, id, bootstrapPeers, shouldGossip, pol, f, config, mockTracker, nil)
+}
+
+func createDiscoveryInstanceWithAnchorPeerTracker(port int, id string, bootstrapPeers []string, shouldGossip bool, pol DisclosurePolicy,
+	f func(*protoext.SignedGossipMessage), config DiscoveryConfig, anchorPeerTracker AnchorPeerTracker, logger util.Logger) *gossipInstance {
 	comm := &dummyCommModule{
 		conns:          make(map[string]*grpc.ClientConn),
 		streams:        make(map[string]proto.Gossip_GossipStreamClient),
@@ -409,7 +431,11 @@ func createDiscoveryInstanceThatGossipsWithInterceptors(port int, id string, boo
 	s := grpc.NewServer()
 
 	config.BootstrapPeers = bootstrapPeers
-	discSvc := NewDiscoveryService(self, comm, comm, pol, config)
+
+	if logger == nil {
+		logger = util.GetLogger(util.DiscoveryLogger, self.InternalEndpoint)
+	}
+	discSvc := NewDiscoveryService(self, comm, comm, pol, config, anchorPeerTracker, logger)
 	for _, bootPeer := range bootstrapPeers {
 		bp := bootPeer
 		discSvc.Connect(NetworkMember{Endpoint: bp, InternalEndpoint: bootPeer}, func() (*PeerIdentification, error) {
@@ -445,17 +471,17 @@ func TestClone(t *testing.T) {
 	}
 
 	nm2 := nm.Clone()
-	assert.Equal(t, *nm, nm2, "Clones are different")
-	assert.False(t, nm.Properties == nm2.Properties, "Cloning should be deep and not shallow")
-	assert.False(t, nm.Envelope == nm2.Envelope, "Cloning should be deep and not shallow")
+	require.Equal(t, *nm, nm2, "Clones are different")
+	require.False(t, nm.Properties == nm2.Properties, "Cloning should be deep and not shallow")
+	require.False(t, nm.Envelope == nm2.Envelope, "Cloning should be deep and not shallow")
 }
 
 func TestHasExternalEndpoints(t *testing.T) {
 	memberWithEndpoint := NetworkMember{Endpoint: "foo"}
 	memberWithoutEndpoint := NetworkMember{}
 
-	assert.True(t, HasExternalEndpoint(memberWithEndpoint))
-	assert.False(t, HasExternalEndpoint(memberWithoutEndpoint))
+	require.True(t, HasExternalEndpoint(memberWithEndpoint))
+	require.False(t, HasExternalEndpoint(memberWithoutEndpoint))
 }
 
 func TestToString(t *testing.T) {
@@ -463,18 +489,18 @@ func TestToString(t *testing.T) {
 		Endpoint:         "a",
 		InternalEndpoint: "b",
 	}
-	assert.Equal(t, "b", nm.PreferredEndpoint())
+	require.Equal(t, "b", nm.PreferredEndpoint())
 	nm = NetworkMember{
 		Endpoint: "a",
 	}
-	assert.Equal(t, "a", nm.PreferredEndpoint())
+	require.Equal(t, "a", nm.PreferredEndpoint())
 
 	now := time.Now()
 	ts := &timestamp{
 		incTime: now,
 		seqNum:  uint64(42),
 	}
-	assert.Equal(t, fmt.Sprintf("%d, %d", now.UnixNano(), 42), fmt.Sprint(ts))
+	require.Equal(t, fmt.Sprintf("%d, %d", now.UnixNano(), 42), fmt.Sprint(ts))
 }
 
 func TestNetworkMemberString(t *testing.T) {
@@ -492,7 +518,7 @@ func TestNetworkMemberString(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		assert.Equal(t, tt.expected, tt.input.String())
+		require.Equal(t, tt.expected, tt.input.String())
 	}
 }
 
@@ -552,16 +578,28 @@ func TestConnect(t *testing.T) {
 	discInst := instances[rand.Intn(len(instances))].Discovery.(*gossipDiscoveryImpl)
 	mr, _ := discInst.createMembershipRequest(true)
 	am, _ := protoext.EnvelopeToGossipMessage(mr.GetMemReq().SelfInformation)
-	assert.NotNil(t, am.SecretEnvelope)
+	require.NotNil(t, am.SecretEnvelope)
 	mr2, _ := discInst.createMembershipRequest(false)
 	am, _ = protoext.EnvelopeToGossipMessage(mr2.GetMemReq().SelfInformation)
-	assert.Nil(t, am.SecretEnvelope)
+	require.Nil(t, am.SecretEnvelope)
 	stopInstances(t, instances)
-	assert.Len(t, firstSentMemReqMsgs, 10)
+	require.Len(t, firstSentMemReqMsgs, 10)
 	close(firstSentMemReqMsgs)
 	for firstSentSelfMsg := range firstSentMemReqMsgs {
-		assert.Nil(t, firstSentSelfMsg.Envelope.SecretEnvelope)
+		require.Nil(t, firstSentSelfMsg.Envelope.SecretEnvelope)
 	}
+}
+
+func TestNoSigningIfNoMembership(t *testing.T) {
+	t.Parallel()
+
+	inst := createDiscoveryInstance(8931, "foreveralone", nil)
+	defer inst.Stop()
+	time.Sleep(defaultTestConfig.AliveTimeInterval * 10)
+	assert.Zero(t, atomic.LoadUint32(&inst.comm.signCount))
+
+	inst.InitiateSync(10000)
+	assert.Zero(t, atomic.LoadUint32(&inst.comm.signCount))
 }
 
 func TestValidation(t *testing.T) {
@@ -653,8 +691,8 @@ func TestValidation(t *testing.T) {
 	t.Log("Recorded", len(responseMessagesReceived), "response messages")
 
 	// Ensure we got alive messages from membership requests and from membership responses
-	assert.NotNil(t, membershipResponseWithAlivePeers.Load())
-	assert.NotNil(t, membershipRequest.Load())
+	require.NotNil(t, membershipResponseWithAlivePeers.Load())
+	require.NotNil(t, membershipRequest.Load())
 
 	t.Run("alive message", func(t *testing.T) {
 		// Spawn a new peer - p4
@@ -678,18 +716,18 @@ func TestValidation(t *testing.T) {
 			if msgStore.Add(msg) {
 				// Ensure the message was verified if it can be added into the message store
 				expectedMessage := <-validatedMessages
-				assert.Equal(t, expectedMessage, msg)
+				require.Equal(t, expectedMessage, msg)
 			}
 		}
 		// Ensure we didn't validate any other messages.
-		assert.Empty(t, validatedMessages)
+		require.Empty(t, validatedMessages)
 	})
 
 	req := membershipRequest.Load().(*protoext.SignedGossipMessage)
 	res := membershipResponseWithDeadPeers.Load().(*protoext.SignedGossipMessage)
 	// Ensure the membership response contains both alive and dead peers
-	assert.Len(t, res.GetMemRes().GetAlive(), 2)
-	assert.Len(t, res.GetMemRes().GetDead(), 1)
+	require.Len(t, res.GetMemRes().GetAlive(), 2)
+	require.Len(t, res.GetMemRes().GetDead(), 1)
 
 	for _, testCase := range []struct {
 		name                  string
@@ -732,7 +770,7 @@ func TestValidation(t *testing.T) {
 				<-validatedMessages
 			}
 			// Not more than testCase.expectedAliveMessages should have been validated
-			assert.Empty(t, validatedMessages)
+			require.Empty(t, validatedMessages)
 
 			if !testCase.shouldBeReValidated {
 				// Re-submit the message twice and ensure it wasn't validated.
@@ -779,7 +817,7 @@ func TestUpdate(t *testing.T) {
 	checkMembership := func() bool {
 		for _, member := range instances[nodeNum-1].GetMembership() {
 			if string(member.PKIid) == instances[0].comm.id {
-				if "bla bla" != string(member.Metadata) {
+				if string(member.Metadata) != "bla bla" {
 					return false
 				}
 			}
@@ -787,7 +825,7 @@ func TestUpdate(t *testing.T) {
 
 		for _, member := range instances[0].GetMembership() {
 			if string(member.PKIid) == instances[nodeNum-1].comm.id {
-				if "localhost:5511" != string(member.Endpoint) {
+				if member.Endpoint != "localhost:5511" {
 					return false
 				}
 			}
@@ -830,13 +868,13 @@ func TestSelf(t *testing.T) {
 	defer inst.Stop()
 	env := inst.Self().Envelope
 	sMsg, err := protoext.EnvelopeToGossipMessage(env)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	member := sMsg.GetAliveMsg().Membership
-	assert.Equal(t, "localhost:13463", member.Endpoint)
-	assert.Equal(t, []byte("localhost:13463"), member.PkiId)
+	require.Equal(t, "localhost:13463", member.Endpoint)
+	require.Equal(t, []byte("localhost:13463"), member.PkiId)
 
-	assert.Equal(t, "localhost:13463", inst.Self().Endpoint)
-	assert.Equal(t, common.PKIidType("localhost:13463"), inst.Self().PKIid)
+	require.Equal(t, "localhost:13463", inst.Self().Endpoint)
+	require.Equal(t, common.PKIidType("localhost:13463"), inst.Self().PKIid)
 }
 
 func TestExpiration(t *testing.T) {
@@ -903,16 +941,16 @@ func TestGetFullMembership(t *testing.T) {
 	// Ensure that internal endpoint was propagated to everyone
 	for _, inst := range instances {
 		for _, member := range inst.GetMembership() {
-			assert.NotEmpty(t, member.InternalEndpoint)
-			assert.NotEmpty(t, member.Endpoint)
+			require.NotEmpty(t, member.InternalEndpoint)
+			require.NotEmpty(t, member.Endpoint)
 		}
 	}
 
 	// Check that Lookup() is valid
 	for _, inst := range instances {
 		for _, member := range inst.GetMembership() {
-			assert.Equal(t, string(member.PKIid), inst.Lookup(member.PKIid).Endpoint)
-			assert.Equal(t, member.PKIid, inst.Lookup(member.PKIid).PKIid)
+			require.Equal(t, string(member.PKIid), inst.Lookup(member.PKIid).Endpoint)
+			require.Equal(t, member.PKIid, inst.Lookup(member.PKIid).PKIid)
 		}
 	}
 
@@ -1032,7 +1070,7 @@ func TestDisclosurePolicyWithPull(t *testing.T) {
 		portsOfKnownMembers := portsOfMembers(inst.GetMembership())
 		// Ensure the expected membership is equal to the actual membership
 		// of each peer. the portsOfMembers returns a sorted slice so assert.Equal does the job.
-		assert.Equal(t, peersThatShouldBeKnownToPeers[inst.port], portsOfKnownMembers)
+		require.Equal(t, peersThatShouldBeKnownToPeers[inst.port], portsOfKnownMembers)
 		// Next, check that internal endpoints aren't leaked across groups,
 		for _, knownPeer := range inst.GetMembership() {
 			// If internal endpoint is known, ensure the peers are in the same group
@@ -1041,7 +1079,7 @@ func TestDisclosurePolicyWithPull(t *testing.T) {
 			if len(knownPeer.InternalEndpoint) > 0 && inst.port%2 != 0 {
 				bothInGroup1 := portOfEndpoint(knownPeer.Endpoint) < 8615 && inst.port < 8615
 				bothInGroup2 := portOfEndpoint(knownPeer.Endpoint) >= 8615 && inst.port >= 8615
-				assert.True(t, bothInGroup1 || bothInGroup2, "%v knows about %v's internal endpoint", inst.port, knownPeer.InternalEndpoint)
+				require.True(t, bothInGroup1 || bothInGroup2, "%v knows about %v's internal endpoint", inst.port, knownPeer.InternalEndpoint)
 			}
 		}
 	}
@@ -1053,9 +1091,9 @@ func TestDisclosurePolicyWithPull(t *testing.T) {
 	time.Sleep(time.Second * 6)
 	for _, inst := range append(instances1[1:], instances2...) {
 		if peersThatShouldBeKnownToPeers[inst.port][0] == 8610 {
-			assert.Equal(t, 1, inst.Discovery.(*gossipDiscoveryImpl).deadMembership.Size())
+			require.Equal(t, 1, inst.Discovery.(*gossipDiscoveryImpl).deadMembership.Size())
 		} else {
-			assert.Equal(t, 0, inst.Discovery.(*gossipDiscoveryImpl).deadMembership.Size())
+			require.Equal(t, 0, inst.Discovery.(*gossipDiscoveryImpl).deadMembership.Size())
 		}
 	}
 	stopInstances(t, instances1[1:])
@@ -1175,7 +1213,7 @@ func TestCertificateChange(t *testing.T) {
 	}, timeout)
 
 	// Ensure the first peer ceases from trying
-	assert.Equal(t, c1, pingCount1())
+	require.Equal(t, c1, pingCount1())
 
 	waitUntilOrFailBlocking(t, p1.Stop)
 	waitUntilOrFailBlocking(t, p3.Stop)
@@ -1246,7 +1284,7 @@ func TestMsgStoreExpiration(t *testing.T) {
 		return true
 	}
 
-	waitUntilTimeoutOrFail(t, checkMessages, defaultTestConfig.AliveExpirationTimeout*(msgExpirationFactor+5))
+	waitUntilTimeoutOrFail(t, checkMessages, defaultTestConfig.AliveExpirationTimeout*(DefMsgExpirationFactor+5))
 
 	assertMembership(t, instances[:len(instances)-2], nodeNum-3)
 
@@ -1255,7 +1293,7 @@ func TestMsgStoreExpiration(t *testing.T) {
 
 func TestExpirationNoSecretEnvelope(t *testing.T) {
 	l, err := zap.NewDevelopment()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	removed := make(chan struct{})
 	logger := flogging.NewFabricLogger(l, zap.Hooks(func(entry zapcore.Entry) error {
@@ -1265,12 +1303,14 @@ func TestExpirationNoSecretEnvelope(t *testing.T) {
 		return nil
 	}))
 
+	mockTracker := &mockAnchorPeerTracker{}
 	msgStore := newAliveMsgStore(&gossipDiscoveryImpl{
 		aliveExpirationTimeout: time.Millisecond,
 		lock:                   &sync.RWMutex{},
 		aliveMembership:        util.NewMembershipStore(),
 		deadMembership:         util.NewMembershipStore(),
 		logger:                 logger,
+		anchorPeerTracker:      mockTracker,
 	})
 
 	msg := &proto.GossipMessage{
@@ -1282,7 +1322,7 @@ func TestExpirationNoSecretEnvelope(t *testing.T) {
 	}
 
 	sMsg, err := protoext.NoopSign(msg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	msgStore.Add(sMsg)
 	select {
@@ -1354,14 +1394,14 @@ func TestMsgStoreExpirationWithMembershipMessages(t *testing.T) {
 
 	checkExistence := func(instances []*gossipInstance, msgs []*protoext.SignedGossipMessage, index int, i int, step string) {
 		_, exist := instances[index].discoveryImpl().aliveLastTS[string(instances[i].discoveryImpl().self.PKIid)]
-		assert.True(t, exist, fmt.Sprint(step, " Data from alive msg ", i, " doesn't exist in aliveLastTS of discovery inst ", index))
+		require.True(t, exist, fmt.Sprint(step, " Data from alive msg ", i, " doesn't exist in aliveLastTS of discovery inst ", index))
 
 		_, exist = instances[index].discoveryImpl().id2Member[string(string(instances[i].discoveryImpl().self.PKIid))]
-		assert.True(t, exist, fmt.Sprint(step, " id2Member mapping doesn't exist for alive msg ", i, " of discovery inst ", index))
+		require.True(t, exist, fmt.Sprint(step, " id2Member mapping doesn't exist for alive msg ", i, " of discovery inst ", index))
 
-		assert.NotNil(t, instances[index].discoveryImpl().aliveMembership.MsgByID(instances[i].discoveryImpl().self.PKIid), fmt.Sprint(step, " Alive msg", i, " not exist in aliveMembership of discovery inst ", index))
+		require.NotNil(t, instances[index].discoveryImpl().aliveMembership.MsgByID(instances[i].discoveryImpl().self.PKIid), fmt.Sprint(step, " Alive msg", i, " not exist in aliveMembership of discovery inst ", index))
 
-		assert.Contains(t, instances[index].discoveryImpl().msgStore.Get(), msgs[i], fmt.Sprint(step, " Alive msg ", i, "not stored in store of discovery inst ", index))
+		require.Contains(t, instances[index].discoveryImpl().msgStore.Get(), msgs[i], fmt.Sprint(step, " Alive msg ", i, "not stored in store of discovery inst ", index))
 	}
 
 	checkAliveMsgExist := func(instances []*gossipInstance, msgs []*protoext.SignedGossipMessage, index int, step string) {
@@ -1427,16 +1467,16 @@ func TestMsgStoreExpirationWithMembershipMessages(t *testing.T) {
 	checkAliveMsgNotExist := func(instances []*gossipInstance, msgs []*protoext.SignedGossipMessage, index int, step string) {
 		instances[index].discoveryImpl().lock.RLock()
 		defer instances[index].discoveryImpl().lock.RUnlock()
-		assert.Empty(t, instances[index].discoveryImpl().aliveLastTS, fmt.Sprint(step, " Data from alive msg still exists in aliveLastTS of discovery inst ", index))
-		assert.Empty(t, instances[index].discoveryImpl().deadLastTS, fmt.Sprint(step, " Data from alive msg still exists in deadLastTS of discovery inst ", index))
-		assert.Empty(t, instances[index].discoveryImpl().id2Member, fmt.Sprint(step, " id2Member mapping still still contains data related to Alive msg: discovery inst ", index))
-		assert.Empty(t, instances[index].discoveryImpl().msgStore.Get(), fmt.Sprint(step, " Expired Alive msg still stored in store of discovery inst ", index))
-		assert.Zero(t, instances[index].discoveryImpl().aliveMembership.Size(), fmt.Sprint(step, " Alive membership list is not empty, discovery instance", index))
-		assert.Zero(t, instances[index].discoveryImpl().deadMembership.Size(), fmt.Sprint(step, " Dead membership list is not empty, discovery instance", index))
+		require.Empty(t, instances[index].discoveryImpl().aliveLastTS, fmt.Sprint(step, " Data from alive msg still exists in aliveLastTS of discovery inst ", index))
+		require.Empty(t, instances[index].discoveryImpl().deadLastTS, fmt.Sprint(step, " Data from alive msg still exists in deadLastTS of discovery inst ", index))
+		require.Empty(t, instances[index].discoveryImpl().id2Member, fmt.Sprint(step, " id2Member mapping still still contains data related to Alive msg: discovery inst ", index))
+		require.Empty(t, instances[index].discoveryImpl().msgStore.Get(), fmt.Sprint(step, " Expired Alive msg still stored in store of discovery inst ", index))
+		require.Zero(t, instances[index].discoveryImpl().aliveMembership.Size(), fmt.Sprint(step, " Alive membership list is not empty, discovery instance", index))
+		require.Zero(t, instances[index].discoveryImpl().deadMembership.Size(), fmt.Sprint(step, " Dead membership list is not empty, discovery instance", index))
 	}
 
 	// Sleep until expire
-	time.Sleep(defaultTestConfig.AliveExpirationTimeout * (msgExpirationFactor + 5))
+	time.Sleep(defaultTestConfig.AliveExpirationTimeout * (DefMsgExpirationFactor + 5))
 
 	// Checking Alive expired
 	for i := 0; i < peersNum; i++ {
@@ -1510,7 +1550,6 @@ func TestMsgStoreExpirationWithMembershipMessages(t *testing.T) {
 	for i := 0; i < peersNum; i++ {
 		instances[i].Stop()
 	}
-
 }
 
 func TestAliveMsgStore(t *testing.T) {
@@ -1538,47 +1577,53 @@ func TestAliveMsgStore(t *testing.T) {
 		aliveMsgs = append(aliveMsgs, aliveMsg)
 	}
 
-	//Check new alive msgs
+	// Check new alive msgs
 	for _, msg := range aliveMsgs {
-		assert.True(t, instances[0].discoveryImpl().msgStore.CheckValid(msg), "aliveMsgStore CheckValid returns false on new AliveMsg")
+		require.True(t, instances[0].discoveryImpl().msgStore.CheckValid(msg), "aliveMsgStore CheckValid returns false on new AliveMsg")
 	}
 
 	// Add new alive msgs
 	for _, msg := range aliveMsgs {
-		assert.True(t, instances[0].discoveryImpl().msgStore.Add(msg), "aliveMsgStore Add returns false on new AliveMsg")
+		require.True(t, instances[0].discoveryImpl().msgStore.Add(msg), "aliveMsgStore Add returns false on new AliveMsg")
 	}
 
 	// Check exist alive msgs
 	for _, msg := range aliveMsgs {
-		assert.False(t, instances[0].discoveryImpl().msgStore.CheckValid(msg), "aliveMsgStore CheckValid returns true on existing AliveMsg")
+		require.False(t, instances[0].discoveryImpl().msgStore.CheckValid(msg), "aliveMsgStore CheckValid returns true on existing AliveMsg")
 	}
 
 	// Check non-alive msgs
 	for _, msg := range memReqMsgs {
-		assert.Panics(t, func() { instances[1].discoveryImpl().msgStore.CheckValid(msg) }, "aliveMsgStore CheckValid should panic on new MembershipRequest msg")
-		assert.Panics(t, func() { instances[1].discoveryImpl().msgStore.Add(msg) }, "aliveMsgStore Add should panic on new MembershipRequest msg")
+		require.Panics(t, func() { instances[1].discoveryImpl().msgStore.CheckValid(msg) }, "aliveMsgStore CheckValid should panic on new MembershipRequest msg")
+		require.Panics(t, func() { instances[1].discoveryImpl().msgStore.Add(msg) }, "aliveMsgStore Add should panic on new MembershipRequest msg")
 	}
 }
 
 func TestMemRespDisclosurePol(t *testing.T) {
 	pol := func(remotePeer *NetworkMember) (Sieve, EnvelopeFilter) {
+		assert.Equal(t, remotePeer.InternalEndpoint, remotePeer.Endpoint)
 		return func(_ *protoext.SignedGossipMessage) bool {
-				return remotePeer.Endpoint == "localhost:7880"
+				return remotePeer.Endpoint != "localhost:7879"
 			}, func(m *protoext.SignedGossipMessage) *proto.Envelope {
 				return m.Envelope
 			}
 	}
+
+	wasMembershipResponseReceived := func(msg *protoext.SignedGossipMessage) {
+		assert.Nil(t, msg.GetMemRes())
+	}
+
 	d1 := createDiscoveryInstanceThatGossips(7878, "d1", []string{}, true, pol, defaultTestConfig)
 	defer d1.Stop()
-	d2 := createDiscoveryInstanceThatGossips(7879, "d2", []string{"localhost:7878"}, true, noopPolicy, defaultTestConfig)
+	d2 := createDiscoveryInstanceThatGossipsWithInterceptors(7879, "d2", []string{"localhost:7878"}, true, noopPolicy, wasMembershipResponseReceived, defaultTestConfig)
 	defer d2.Stop()
-	d3 := createDiscoveryInstanceThatGossips(7880, "d3", []string{"localhost:7878"}, true, noopPolicy, defaultTestConfig)
+	d3 := createDiscoveryInstanceThatGossips(7880, "d3", []string{"localhost:7878"}, true, pol, defaultTestConfig)
 	defer d3.Stop()
-	// Both d1 and d3 know each other, and also about d2
-	assertMembership(t, []*gossipInstance{d1, d3}, 2)
-	// d2 doesn't know about any one because the bootstrap peer is ignoring it due to custom policy
-	assertMembership(t, []*gossipInstance{d2}, 0)
-	assert.Zero(t, d2.receivedMsgCount())
+
+	// all peers know each other
+	assertMembership(t, []*gossipInstance{d1, d2, d3}, 2)
+	// d2 received some messages, but we asserted that none of them are membership responses.
+	assert.NotZero(t, d2.receivedMsgCount())
 	assert.NotZero(t, d2.sentMsgCount())
 }
 
@@ -1588,9 +1633,9 @@ func TestMembersByID(t *testing.T) {
 		{PKIid: common.PKIidType("p1"), Endpoint: "p1"},
 	}
 	byID := members.ByID()
-	assert.Len(t, byID, 2)
-	assert.Equal(t, "p0", byID["p0"].Endpoint)
-	assert.Equal(t, "p1", byID["p1"].Endpoint)
+	require.Len(t, byID, 2)
+	require.Equal(t, "p0", byID["p0"].Endpoint)
+	require.Equal(t, "p1", byID["p1"].Endpoint)
 }
 
 func TestFilter(t *testing.T) {
@@ -1606,7 +1651,7 @@ func TestFilter(t *testing.T) {
 		cc := member.Properties.Chaincodes[0]
 		return cc.Version == "2.0" && cc.Name == "cc"
 	})
-	assert.Equal(t, Members{members[1]}, res)
+	require.Equal(t, Members{members[1]}, res)
 }
 
 func TestMap(t *testing.T) {
@@ -1626,10 +1671,10 @@ func TestMap(t *testing.T) {
 		return member
 	}
 
-	assert.Equal(t, expectedMembers, members.Map(addProperty))
+	require.Equal(t, expectedMembers, members.Map(addProperty))
 	// Ensure original members didn't change
-	assert.Nil(t, members[0].Properties)
-	assert.Nil(t, members[1].Properties)
+	require.Nil(t, members[0].Properties)
+	require.Nil(t, members[1].Properties)
 }
 
 func TestMembersIntersect(t *testing.T) {
@@ -1641,7 +1686,7 @@ func TestMembersIntersect(t *testing.T) {
 		{PKIid: common.PKIidType("p1"), Endpoint: "p1"},
 		{PKIid: common.PKIidType("p2"), Endpoint: "p2"},
 	}
-	assert.Equal(t, Members{{PKIid: common.PKIidType("p1"), Endpoint: "p1"}}, members1.Intersect(members2))
+	require.Equal(t, Members{{PKIid: common.PKIidType("p1"), Endpoint: "p1"}}, members1.Intersect(members2))
 }
 
 func TestPeerIsolation(t *testing.T) {
@@ -1672,7 +1717,7 @@ func TestPeerIsolation(t *testing.T) {
 
 	// Sleep the same amount of time as it takes to remove a message from the aliveMsgStore (aliveMsgTTL)
 	// Add a second as buffer
-	time.Sleep(config.AliveExpirationTimeout*msgExpirationFactor + time.Second)
+	time.Sleep(config.AliveExpirationTimeout*DefMsgExpirationFactor + time.Second)
 
 	// Start again the first 2 peers and wait for all the peers to get full membership.
 	// Especially, we want to test that peer2 won't be isolated
@@ -1682,6 +1727,119 @@ func TestPeerIsolation(t *testing.T) {
 		instances[i] = inst
 	}
 	assertMembership(t, instances, peersNum-1)
+}
+
+func TestMembershipAfterExpiration(t *testing.T) {
+	// Scenario:
+	// Start 3 peers (peer0, peer1, peer2). Set peer0 as the anchor peer.
+	// Stop peer0 and peer1 for a while, start them again and test if peer2 still gets full membership
+
+	config := defaultTestConfig
+	// Use a smaller AliveExpirationTimeout than the default to reduce the running time of the test.
+	config.AliveExpirationTimeout = 2 * config.AliveTimeInterval
+	config.ReconnectInterval = config.AliveExpirationTimeout
+	config.MsgExpirationFactor = 5
+
+	peersNum := 3
+	ports := []int{9120, 9121, 9122}
+	anchorPeer := "localhost:9120"
+	bootPeers := []string{}
+	instances := []*gossipInstance{}
+	var inst *gossipInstance
+	mockTracker := &mockAnchorPeerTracker{[]string{anchorPeer}}
+
+	l, err := zap.NewDevelopment()
+	assert.NoError(t, err)
+	expired := make(chan struct{}, 1)
+
+	// use a custom logger to verify messages from expiration callback
+	loggerThatTracksCustomMessage := func() util.Logger {
+		var lock sync.RWMutex
+		expectedMsgs := map[string]struct{}{
+			"Do not remove bootstrap or anchor peer endpoint localhost:9120 from membership":                                   {},
+			"Removing member: Endpoint: localhost:9121, InternalEndpoint: localhost:9121, PKIID: 6c6f63616c686f73743a39313231": {},
+		}
+
+		return flogging.NewFabricLogger(l, zap.Hooks(func(entry zapcore.Entry) error {
+			// do nothing if we already found all the expectedMsgs
+			lock.RLock()
+			expectedMsgSize := len(expectedMsgs)
+			lock.RUnlock()
+
+			if expectedMsgSize == 0 {
+				select {
+				case expired <- struct{}{}:
+				default:
+					// no room is fine, continue
+				}
+				return nil
+			}
+
+			lock.Lock()
+			defer lock.Unlock()
+
+			delete(expectedMsgs, entry.Message)
+			return nil
+		}))
+	}
+
+	// Start all peers, connect to the anchor peer and verify full membership
+	for i := 0; i < peersNum; i++ {
+		id := fmt.Sprintf("d%d", i)
+		logger := loggerThatTracksCustomMessage()
+		inst = createDiscoveryInstanceWithAnchorPeerTracker(ports[i], id, bootPeers, true, noopPolicy, func(_ *protoext.SignedGossipMessage) {}, config, mockTracker, logger)
+		instances = append(instances, inst)
+	}
+	for i := 1; i < peersNum; i++ {
+		connect(instances[i], anchorPeer)
+	}
+	assertMembership(t, instances, peersNum-1)
+
+	// Stop peer0 and peer1 so that peer2 would stay alone
+	stopInstances(t, instances[0:peersNum-1])
+
+	// waitTime is the same amount of time as it takes to remove a message from the aliveMsgStore (aliveMsgTTL)
+	// Add a second as buffer
+	waitTime := config.AliveExpirationTimeout*time.Duration(config.MsgExpirationFactor) + time.Second
+	select {
+	case <-expired:
+	case <-time.After(waitTime):
+		t.Fatalf("timed out")
+	}
+	// peer2's deadMembership should contain the anchor peer
+	deadMemeberShip := instances[peersNum-1].discoveryImpl().deadMembership
+	require.Equal(t, 1, deadMemeberShip.Size())
+	assertMembership(t, instances[peersNum-1:], 0)
+
+	// Start again peer0 and peer1 and wait for all the peers to get full membership.
+	// Especially, we want to test that peer2 won't be isolated
+	for i := 0; i < peersNum-1; i++ {
+		id := fmt.Sprintf("d%d", i)
+		inst = createDiscoveryInstanceWithAnchorPeerTracker(ports[i], id, bootPeers, true, noopPolicy, func(_ *protoext.SignedGossipMessage) {}, config, mockTracker, nil)
+		instances[i] = inst
+	}
+	connect(instances[1], anchorPeer)
+	assertMembership(t, instances, peersNum-1)
+}
+
+func connect(inst *gossipInstance, endpoint string) {
+	inst.comm.lock.Lock()
+	inst.comm.mock = &mock.Mock{}
+	inst.comm.mock.On("SendToPeer", mock.Anything, mock.Anything).Run(func(arguments mock.Arguments) {
+		inst := inst
+		msg := arguments.Get(1).(*protoext.SignedGossipMessage)
+		if req := msg.GetMemReq(); req != nil {
+			inst.comm.lock.Lock()
+			inst.comm.mock = nil
+			inst.comm.lock.Unlock()
+		}
+	})
+	inst.comm.mock.On("Ping", mock.Anything)
+	inst.comm.lock.Unlock()
+	netMember2Connect2 := NetworkMember{Endpoint: endpoint, PKIid: []byte(endpoint)}
+	inst.Connect(netMember2Connect2, func() (identification *PeerIdentification, err error) {
+		return &PeerIdentification{SelfOrg: true, ID: nil}, nil
+	})
 }
 
 func waitUntilOrFail(t *testing.T, pred func() bool) {
@@ -1697,7 +1855,7 @@ func waitUntilTimeoutOrFail(t *testing.T, pred func() bool, timeout time.Duratio
 		}
 		time.Sleep(timeout / 10)
 	}
-	assert.Fail(t, "Timeout expired!")
+	require.Fail(t, "Timeout expired!")
 }
 
 func waitUntilOrFailBlocking(t *testing.T, f func()) {
@@ -1712,7 +1870,7 @@ func waitUntilOrFailBlocking(t *testing.T, f func()) {
 	case <-successChan:
 		return
 	}
-	assert.Fail(t, "Timeout expired!")
+	require.Fail(t, "Timeout expired!")
 }
 
 func stopInstances(t *testing.T, instances []*gossipInstance) {
@@ -1752,7 +1910,7 @@ func assertMembership(t *testing.T, instances []*gossipInstance, expectedNum int
 	}
 
 	wg.Wait()
-	assert.NoError(t, ctx.Err(), "Timeout expired!")
+	require.NoError(t, ctx.Err(), "Timeout expired!")
 }
 
 func portsOfMembers(members []NetworkMember) []int {

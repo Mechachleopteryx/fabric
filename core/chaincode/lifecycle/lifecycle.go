@@ -9,6 +9,7 @@ package lifecycle
 import (
 	"bytes"
 	"fmt"
+	"sync"
 
 	cb "github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric-protos-go/msp"
@@ -17,6 +18,7 @@ import (
 	"github.com/hyperledger/fabric/common/chaincode"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/policydsl"
+	"github.com/hyperledger/fabric/core/chaincode/implicitcollection"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
 	"github.com/hyperledger/fabric/core/container"
 	"github.com/hyperledger/fabric/protoutil"
@@ -39,6 +41,14 @@ const (
 	// at some network resource). This namespace is only populated in the org implicit collection.
 	ChaincodeSourcesName = "chaincode-sources"
 
+	// ChaincodeLocalPackageType is the name of the type of chaincode-sources which may be serialized
+	// into the org's private data collection
+	ChaincodeLocalPackageType = "ChaincodeLocalPackage"
+
+	// ChaincodeParametersType is the name of the type used to store the parts of the chaincode definition
+	// which are serialized as values in the statedb
+	ChaincodeParametersType = "ChaincodeParameters"
+
 	// ChaincodeDefinitionType is the name of the type used to store defined chaincodes
 	ChaincodeDefinitionType = "ChaincodeDefinition"
 
@@ -49,13 +59,11 @@ const (
 	DefaultEndorsementPolicyRef = "/Channel/Application/Endorsement"
 )
 
-var (
-	DefaultEndorsementPolicyBytes = protoutil.MarshalOrPanic(&pb.ApplicationPolicy{
-		Type: &pb.ApplicationPolicy_ChannelConfigPolicyReference{
-			ChannelConfigPolicyReference: DefaultEndorsementPolicyRef,
-		},
-	})
-)
+var DefaultEndorsementPolicyBytes = protoutil.MarshalOrPanic(&pb.ApplicationPolicy{
+	Type: &pb.ApplicationPolicy_ChannelConfigPolicyReference{
+		ChannelConfigPolicyReference: DefaultEndorsementPolicyRef,
+	},
+})
 
 // Sequences are the underpinning of the definition framework for lifecycle.
 // All definitions must have a Sequence field in the public state.  This
@@ -140,6 +148,14 @@ type ChaincodeDefinition struct {
 	EndorsementInfo *lb.ChaincodeEndorsementInfo
 	ValidationInfo  *lb.ChaincodeValidationInfo
 	Collections     *pb.CollectionConfigPackage
+}
+
+type ApprovedChaincodeDefinition struct {
+	Sequence        int64
+	EndorsementInfo *lb.ChaincodeEndorsementInfo
+	ValidationInfo  *lb.ChaincodeValidationInfo
+	Collections     *pb.CollectionConfigPackage
+	Source          *lb.ChaincodeSource
 }
 
 // Parameters returns the non-sequence info of the chaincode definition
@@ -292,6 +308,8 @@ type ExternalFunctions struct {
 	InstalledChaincodesLister InstalledChaincodesLister
 	ChaincodeBuilder          ChaincodeBuilder
 	BuildRegistry             *container.BuildRegistry
+	mutex                     sync.Mutex
+	BuildLocks                map[string]sync.Mutex
 }
 
 // CheckCommitReadiness takes a chaincode definition, checks that
@@ -496,6 +514,98 @@ func (ef *ExternalFunctions) ApproveChaincodeDefinitionForOrg(chname, ccname str
 	return nil
 }
 
+// QueryApprovedChaincodeDefinition returns the approved chaincode definition in Org state by using the given parameters.
+// If the parameter of sequence is not provided, this function returns the latest approved chaincode definition
+// (latest: new one of the currently defined sequence number and the next sequence number).
+func (ef *ExternalFunctions) QueryApprovedChaincodeDefinition(chname, ccname string, sequence int64, publicState ReadableState, orgState ReadableState) (*ApprovedChaincodeDefinition, error) {
+	requestedSequence := sequence
+
+	// If requested sequence is not provided,
+	// set the latest sequence number (either the currently defined sequence number or the next sequence number)
+	if requestedSequence == 0 {
+		currentSequence, err := ef.Resources.Serializer.DeserializeFieldAsInt64(NamespacesName, ccname, "Sequence", publicState)
+		if err != nil {
+			return nil, errors.WithMessage(err, "could not get current sequence")
+		}
+		requestedSequence = currentSequence
+
+		nextSequence := currentSequence + 1
+		privateName := fmt.Sprintf("%s#%d", ccname, nextSequence)
+		_, ok, err := ef.Resources.Serializer.DeserializeMetadata(NamespacesName, privateName, orgState)
+		if err != nil {
+			return nil, errors.WithMessagef(err, "could not deserialize namespace metadata for next sequence %d", nextSequence)
+		}
+		if ok {
+			requestedSequence = nextSequence
+		}
+	}
+
+	logger.Infof("Attempting to fetch approved definition (name: '%s', sequence: '%d') on channel '%s'", ccname, requestedSequence, chname)
+	privateName := fmt.Sprintf("%s#%d", ccname, requestedSequence)
+	metadata, ok, err := ef.Resources.Serializer.DeserializeMetadata(NamespacesName, privateName, orgState)
+	if err != nil {
+		return nil, errors.WithMessagef(err, "could not deserialize namespace metadata for %s", privateName)
+	}
+
+	if !ok {
+		return nil, errors.Errorf("could not fetch approved chaincode definition (name: '%s', sequence: '%d') on channel '%s'", ccname, sequence, chname)
+	}
+
+	if metadata.Datatype != ChaincodeParametersType {
+		return nil, errors.Errorf("not a chaincode parameters type: %s", metadata.Datatype)
+	}
+
+	// Get chaincode parameters for the request sequence
+	ccParameters := &ChaincodeParameters{}
+	if err := ef.Resources.Serializer.Deserialize(NamespacesName, privateName, metadata, ccParameters, orgState); err != nil {
+		return nil, errors.WithMessagef(err, "could not deserialize chaincode parameters for %s", privateName)
+	}
+
+	// Get package ID for the requested sequence
+	metadata, ok, err = ef.Resources.Serializer.DeserializeMetadata(ChaincodeSourcesName, privateName, orgState)
+	if err != nil {
+		return nil, errors.WithMessagef(err, "could not deserialize chaincode-source metadata for %s", privateName)
+	}
+	if !ok {
+		return nil, errors.Errorf("could not fetch approved chaincode definition (name: '%s', sequence: '%d') on channel '%s'", ccname, sequence, chname)
+	}
+	if metadata.Datatype != ChaincodeLocalPackageType {
+		return nil, errors.Errorf("not a chaincode local package type: %s", metadata.Datatype)
+	}
+
+	ccLocalPackage := &ChaincodeLocalPackage{}
+	if err := ef.Resources.Serializer.Deserialize(ChaincodeSourcesName, privateName, metadata, ccLocalPackage, orgState); err != nil {
+		return nil, errors.WithMessagef(err, "could not deserialize chaincode package for %s", privateName)
+	}
+
+	// Convert to lb.ChaincodeSource
+	// An empty package ID means that the chaincode won't be invocable
+	var ccsrc *lb.ChaincodeSource
+	if ccLocalPackage.PackageID != "" {
+		ccsrc = &lb.ChaincodeSource{
+			Type: &lb.ChaincodeSource_LocalPackage{
+				LocalPackage: &lb.ChaincodeSource_Local{
+					PackageId: ccLocalPackage.PackageID,
+				},
+			},
+		}
+	} else {
+		ccsrc = &lb.ChaincodeSource{
+			Type: &lb.ChaincodeSource_Unavailable_{
+				Unavailable: &lb.ChaincodeSource_Unavailable{},
+			},
+		}
+	}
+
+	return &ApprovedChaincodeDefinition{
+		Sequence:        requestedSequence,
+		EndorsementInfo: ccParameters.EndorsementInfo,
+		ValidationInfo:  ccParameters.ValidationInfo,
+		Collections:     ccParameters.Collections,
+		Source:          ccsrc,
+	}, nil
+}
+
 // ErrNamespaceNotDefined is the error returned when a namespace
 // is not defined. This indicates that the chaincode definition
 // has not been committed.
@@ -540,7 +650,7 @@ func (ef *ExternalFunctions) QueryOrgApprovals(name string, cd *ChaincodeDefinit
 			return nil, errors.WithMessagef(err, "serialization check failed for key %s", privateName)
 		}
 
-		org := OrgFromImplicitCollectionName(orgState.CollectionName())
+		_, org := implicitcollection.MspIDIfImplicitCollection(orgState.CollectionName())
 		approvals[org] = match
 	}
 
@@ -565,11 +675,22 @@ func (ef *ExternalFunctions) InstallChaincode(chaincodeInstallPackage []byte) (*
 		return nil, errors.WithMessage(err, "could not save cc install package")
 	}
 
+	buildLock := ef.getBuildLock(packageID)
+	buildLock.Lock()
+	defer buildLock.Unlock()
+
 	buildStatus, ok := ef.BuildRegistry.BuildStatus(packageID)
-	if !ok {
-		err := ef.ChaincodeBuilder.Build(packageID)
-		buildStatus.Notify(err)
+	if ok {
+		// another invocation of lifecycle has concurrently
+		// installed a chaincode with this package id
+		<-buildStatus.Done()
+		if buildStatus.Err() == nil {
+			return nil, errors.New("chaincode already successfully installed")
+		}
+		buildStatus = ef.BuildRegistry.ResetBuildStatus(packageID)
 	}
+	err = ef.ChaincodeBuilder.Build(packageID)
+	buildStatus.Notify(err)
 	<-buildStatus.Done()
 	if err := buildStatus.Err(); err != nil {
 		ef.Resources.ChaincodeStore.Delete(packageID)
@@ -586,6 +707,22 @@ func (ef *ExternalFunctions) InstallChaincode(chaincodeInstallPackage []byte) (*
 		PackageID: packageID,
 		Label:     pkg.Metadata.Label,
 	}, nil
+}
+
+func (ef *ExternalFunctions) getBuildLock(packageID string) *sync.Mutex {
+	ef.mutex.Lock()
+	defer ef.mutex.Unlock()
+
+	if ef.BuildLocks == nil {
+		ef.BuildLocks = map[string]sync.Mutex{}
+	}
+
+	buildLock, ok := ef.BuildLocks[packageID]
+	if !ok {
+		ef.BuildLocks[packageID] = sync.Mutex{}
+	}
+
+	return &buildLock
 }
 
 // GetInstalledChaincodePackage retrieves the installed chaincode with the given package ID
